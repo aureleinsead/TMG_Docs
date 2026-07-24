@@ -2,10 +2,13 @@
 ## What is TMG?
 1. Small intro + def
 2. Systems working alongside it
+
 ## Flow
 Flow, Diagram link ?
+
 ## Capabilities
 Summary of the features
+
 ## Legal requirements
 Regulations link & reporting standar template
 
@@ -55,3 +58,6 @@ Regulations link & reporting standar template
 
 
 # Technical Specifications
+
+# Decisions and ideas (suggestion)
+Keeps track of past changes and decisions taken to not lose them and keep the document clean
