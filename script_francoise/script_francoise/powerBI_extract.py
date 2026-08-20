@@ -1,6 +1,9 @@
 import json
 import tempfile
 import zipfile
+import os
+import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -664,28 +667,116 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.withdraw()
 
-    layout_file = filedialog.askopenfilename(
-        title="Select Power BI Layout file",
-        filetypes=[("All files", "*.*")]
-    )
+    # Ask user to choose between a .zip/.pbix archive or an already-extracted folder
+    choice = tk.StringVar(value="")
 
-    if not layout_file:
-        print("No file selected.")
+    def _pick_zip():
+        choice.set("zip")
+        picker.destroy()
+
+    def _pick_folder():
+        choice.set("folder")
+        picker.destroy()
+
+    picker = tk.Toplevel(root)
+    picker.title("Power BI Extractor - Select input type")
+    picker.resizable(False, False)
+    tk.Label(picker, text="What do you want to open?", font=("Segoe UI", 10)).pack(padx=24, pady=(16, 6))
+    tk.Button(picker, text="Select a .zip / .pbix file", command=_pick_zip, width=30).pack(padx=24, pady=4)
+    tk.Button(picker, text="Select an extracted folder",  command=_pick_folder, width=30).pack(padx=24, pady=(4, 16))
+    picker.protocol("WM_DELETE_WINDOW", lambda: (choice.set("cancel"), picker.destroy()))
+    picker.grab_set()
+    root.wait_window(picker)
+
+    if choice.get() in ("", "cancel"):
+        print("No input selected.")
+        root.destroy()
         exit()
 
-    output_file = filedialog.asksaveasfilename(
-        title="Save Excel output file",
-        defaultextension=".xlsx",
-        filetypes=[("Excel file", "*.xlsx")]
-    )
-
-    if not output_file:
-        output_file = "powerbi_visual_field_extraction.xlsx"
-
+    # If user selected a .zip or .pbix archive, extract and search for Report/Layout
+    tmp_dir = None
     try:
-        result = export_to_excel(layout_file, output_file)
-        print(f"Extraction complete: {result}")
-    except Exception as e:
-        print(f"Error: {e}")
+        if choice.get() == "zip":
+            layout_file = filedialog.askopenfilename(
+                title="Select Power BI .zip or .pbix archive",
+                filetypes=[("Power BI / ZIP archives", "*.zip *.pbix"), ("All files", "*.*")]
+            )
 
-    root.destroy()
+            if not layout_file:
+                print("No file selected.")
+                exit()
+
+            tmp_dir = tempfile.mkdtemp(prefix="pbi_extract_")
+            try:
+                with zipfile.ZipFile(layout_file, "r") as z:
+                    z.extractall(tmp_dir)
+            except Exception as e:
+                root.destroy()
+                print(f"Error extracting archive: {e}")
+                time.sleep(10)
+                if tmp_dir and os.path.exists(tmp_dir):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                exit(1)
+
+            search_root = Path(tmp_dir)
+
+        else:  # folder
+            selected_folder = filedialog.askdirectory(
+                title="Select extracted Power BI folder"
+            )
+
+            if not selected_folder:
+                print("No folder selected.")
+                exit()
+
+            search_root = Path(selected_folder)
+
+        # Search for a 'Report' directory (case-insensitive)
+        report_dirs = [p for p in search_root.rglob("*") if p.is_dir() and p.name.lower() == "report"]
+        if not report_dirs:
+            root.destroy()
+            print(f"Error: 'Report' folder not found inside {search_root}.")
+            time.sleep(10)
+            if tmp_dir and os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            exit(1)
+
+        report_dir = report_dirs[0]
+
+        # Search for the Layout file inside the Report folder (case-insensitive name)
+        layout_candidates = [p for p in report_dir.rglob("*") if p.is_file() and p.name.lower() == "layout"]
+        if not layout_candidates:
+            root.destroy()
+            print(f"Error: 'Layout' file not found inside Report folder of {search_root}.")
+            time.sleep(10)
+            if tmp_dir and os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            exit(1)
+
+        # Use the first matching Layout file
+        layout_file_path = str(layout_candidates[0])
+
+        output_file = filedialog.asksaveasfilename(
+            title="Save Excel output file",
+            defaultextension=".xlsx",
+            filetypes=[("Excel file", "*.xlsx")]
+        )
+
+        if not output_file:
+            output_file = "powerbi_visual_field_extraction.xlsx"
+
+        try:
+            result = export_to_excel(layout_file_path, output_file)
+            print(f"Extraction complete: {result}")
+        except Exception as e:
+            print(f"Error: {e}")
+            root.destroy()
+            time.sleep(10)
+            if tmp_dir and os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            exit(1)
+
+    finally:
+        root.destroy()
+        if tmp_dir and os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
