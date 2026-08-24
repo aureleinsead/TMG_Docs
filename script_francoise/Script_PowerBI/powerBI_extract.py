@@ -611,6 +611,178 @@ def extract_layout_inventory(layout_path):
     return df_pages, df_visuals, df_fields, df_data_visuals_only
 
 
+# =========================
+# PBIR FORMAT (no Layout file)
+# =========================
+
+def _extract_fields_from_pbir_query_state(query_state):
+    """Build field list from PBIR queryState: {Role: {projections: [...]}}."""
+    if not isinstance(query_state, dict):
+        return []
+
+    fields = []
+    seen = set()
+
+    for role_name, role_data in query_state.items():
+        if not isinstance(role_data, dict):
+            continue
+        for proj in role_data.get("projections", []):
+            if not isinstance(proj, dict):
+                continue
+            if not proj.get("active", True):
+                continue
+
+            query_ref = proj.get("queryRef", "")
+            field = proj.get("field", {})
+            display = (proj.get("displayName")
+                       or proj.get("nativeQueryRef")
+                       or (query_ref.split(".", 1)[1] if "." in query_ref else query_ref))
+
+            if "Column" in field:
+                kind = "Column"
+                entity = field["Column"].get("Expression", {}).get("SourceRef", {}).get("Entity", "")
+                prop = field["Column"].get("Property", "")
+                technical = f"{entity}.{prop}" if entity else prop
+            elif "Measure" in field:
+                kind = "Measure"
+                technical = field["Measure"].get("Property", query_ref)
+            elif "HierarchyLevel" in field:
+                kind = "HierarchyLevel"
+                technical = query_ref
+            else:
+                kind = "Column"
+                technical = query_ref
+
+            key = (technical, role_name)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            fields.append({"display": display, "technical": technical,
+                           "kind": kind, "role": role_name})
+
+    return fields
+
+
+def _extract_visual_container_info_pbir(page_display_name, visual_json, visual_index):
+    """Extract visual info directly from a PBIR visual.json dict."""
+    position = visual_json.get("position", {})
+    visual = visual_json.get("visual", {})
+    visual_type = visual.get("visualType")
+    query = visual.get("query", {})
+    query_state = query.get("queryState", {}) if isinstance(query, dict) else {}
+
+    # Reuse existing title helpers by wrapping visual in singleVisual
+    config_wrap = {"singleVisual": visual}
+    if visual_type == "textbox":
+        visual_title = extract_textbox_content(config_wrap)
+    else:
+        visual_title = get_visual_title(config_wrap)
+    fallback = visual_type or ""
+    visual_title = visual_title or (f"{fallback} [{visual_index}]" if fallback else f"[{visual_index}]")
+
+    fields = _extract_fields_from_pbir_query_state(query_state)
+    roles = [f["role"] for f in fields if f["role"]]
+
+    visual_row = {
+        "Page": page_display_name,
+        "Visual Index": visual_index,
+        "Visual Name": visual_title,
+        "Visual Type": visual_type,
+        "Field Count": len(fields),
+        "Fields (display)": unique_join([f["display"] for f in fields if f["display"]]),
+        "Fields (technical)": unique_join([f["technical"] for f in fields if f["technical"]]),
+        "Projection Roles": format_roles(roles),
+        "Position X": position.get("x"),
+        "Position Y": position.get("y"),
+        "Width": position.get("width"),
+        "Height": position.get("height"),
+    }
+
+    field_output = [
+        {
+            "Page": page_display_name,
+            "Visual Index": visual_index,
+            "Visual Name": visual_title,
+            "Visual Type": visual_type,
+            "Field Display Name": f["display"],
+            "Field Technical Name": f["technical"],
+            "Field Kind": f["kind"],
+            "Projection Role": f["role"],
+        }
+        for f in fields
+    ]
+
+    return visual_row, field_output
+
+
+def extract_pbir_inventory(report_dir: Path):
+    """Extract layout inventory from a PBIR-format Report directory."""
+    # Locate page.json files regardless of how deep pages/ is nested
+    page_json_paths = list(report_dir.rglob("page.json"))
+    if not page_json_paths:
+        raise FileNotFoundError(f"No PBIR page structure (page.json) found inside {report_dir}")
+
+    page_entries = []
+    for page_json_path in page_json_paths:
+        try:
+            page_data = json.loads(page_json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        page_folder = page_json_path.parent
+        page_entries.append((page_data.get("ordinal", 0), page_folder, page_data))
+
+    page_entries.sort(key=lambda x: x[0])
+
+    page_rows = []
+    visual_rows = []
+    field_rows = []
+
+    for _, page_folder, page_data in page_entries:
+        page_display_name = page_data.get("displayName") or page_data.get("name") or page_folder.name
+
+        visuals_dir = page_folder / "visuals"
+        visual_entries = []
+        if visuals_dir.is_dir():
+            for vis_folder in sorted(visuals_dir.iterdir()):
+                if not vis_folder.is_dir():
+                    continue
+                vis_json_path = vis_folder / "visual.json"
+                if not vis_json_path.exists():
+                    continue
+                try:
+                    vis_data = json.loads(vis_json_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                pos = vis_data.get("position", {})
+                visual_entries.append((pos.get("z", 0), pos.get("tabOrder", 0), vis_data))
+
+        visual_entries.sort(key=lambda x: (x[0], x[1]))
+
+        page_visuals = []
+        page_fields = []
+        for i, (_, _, vis_data) in enumerate(visual_entries, start=1):
+            v, f = _extract_visual_container_info_pbir(page_display_name, vis_data, i)
+            visual_rows.append(v)
+            field_rows.extend(f)
+            page_visuals.append(v)
+            page_fields.extend(f)
+
+        page_rows.append({
+            "Page": page_display_name,
+            "Visuals": len(page_visuals),
+            "Data Visuals": sum(1 for v in page_visuals if v["Field Count"] > 0),
+            "Total Fields": len(page_fields),
+        })
+
+    df_pages = pd.DataFrame(page_rows)
+    df_visuals = pd.DataFrame(visual_rows)
+    df_fields = pd.DataFrame(field_rows)
+    df_data_visuals_only = df_visuals[df_visuals["Field Count"] > 0].copy()
+
+    return df_pages, df_visuals, df_fields, df_data_visuals_only
+
+
 def export_to_excel(layout_path, output_xlsx):
 
     df_pages, df_visuals, df_fields, df_data_visuals_only = extract_layout_inventory(layout_path)
@@ -652,6 +824,40 @@ def export_to_excel(layout_path, output_xlsx):
                 ws.column_dimensions[col_letter].width = min(max_length + 2, 60)
 
         # Apply styling to all sheets
+        for sheet in workbook.sheetnames:
+            style_sheet(sheet)
+
+    return output_xlsx
+
+
+def export_pbir_to_excel(report_dir, output_xlsx):
+
+    df_pages, df_visuals, df_fields, df_data_visuals_only = extract_pbir_inventory(report_dir)
+
+    with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+        df_pages.to_excel(writer, sheet_name="PAGES_SUMMARY", index=False)
+        df_visuals.to_excel(writer, sheet_name="VISUAL_INVENTORY", index=False)
+        df_fields.to_excel(writer, sheet_name="FIELDS_BY_VISUAL", index=False)
+        df_data_visuals_only.to_excel(writer, sheet_name="DATA_VISUALS_ONLY", index=False)
+
+        workbook = writer.book
+
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Alignment
+
+        def style_sheet(sheet_name):
+            ws = workbook[sheet_name]
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for col in ws.columns:
+                max_length = 0
+                col_letter = get_column_letter(col[0].column)
+                for cell in col:
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                ws.column_dimensions[col_letter].width = min(max_length + 2, 60)
+
         for sheet in workbook.sheetnames:
             style_sheet(sheet)
 
@@ -743,40 +949,60 @@ if __name__ == "__main__":
 
         report_dir = report_dirs[0]
 
-        # Search for the Layout file inside the Report folder (case-insensitive name)
+        # Try traditional Layout file first, then fall back to PBIR format
         layout_candidates = [p for p in report_dir.rglob("*") if p.is_file() and p.name.lower() == "layout"]
         if not layout_candidates:
-            root.destroy()
-            print(f"Error: 'Layout' file not found inside Report folder of {search_root}.")
-            time.sleep(10)
-            if tmp_dir and os.path.exists(tmp_dir):
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            exit(1)
-
-        # Use the first matching Layout file
-        layout_file_path = str(layout_candidates[0])
+            layout_candidates = [p for p in search_root.rglob("*") if p.is_file() and p.name.lower() == "layout"]
 
         output_file = filedialog.asksaveasfilename(
             title="Save Excel output file",
             defaultextension=".xlsx",
             filetypes=[("Excel file", "*.xlsx")]
         )
-
         if not output_file:
             output_file = "powerbi_visual_field_extraction.xlsx"
 
-        try:
-            result = export_to_excel(layout_file_path, output_file)
-            print(f"Extraction complete: {result}")
-        except Exception as e:
-            print(f"Error: {e}")
+        if layout_candidates:
+            # Traditional Layout format
+            try:
+                result = export_to_excel(str(layout_candidates[0]), output_file)
+                print(f"Extraction complete: {result}")
+            except Exception as e:
+                print(f"Error: {e}")
+                root.destroy()
+                time.sleep(10)
+                if tmp_dir and os.path.exists(tmp_dir):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                exit(1)
+
+        elif list(report_dir.rglob("page.json")):
+            # PBIR format detected via page.json files
+            print("Traditional Layout not found — using PBIR page-based extraction.")
+            try:
+                result = export_pbir_to_excel(report_dir, output_file)
+                print(f"Extraction complete: {result}")
+            except Exception as e:
+                print(f"Error: {e}")
+                root.destroy()
+                time.sleep(10)
+                if tmp_dir and os.path.exists(tmp_dir):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                exit(1)
+
+        else:
             root.destroy()
+            print(f"Error: No compatible Power BI format found in {search_root}.")
+            print("Expected a 'Layout' file (traditional .pbix) or page.json files (PBIR format).")
+            print(f"Contents of Report folder: {[p.name for p in report_dir.rglob('*')][:50]}")
             time.sleep(10)
             if tmp_dir and os.path.exists(tmp_dir):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             exit(1)
 
     finally:
-        root.destroy()
+        try:
+            root.destroy()
+        except Exception:
+            pass
         if tmp_dir and os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
