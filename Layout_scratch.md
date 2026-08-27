@@ -365,7 +365,8 @@ PeopleSoft seeded transaction to search and add a person as a contact. Menu navi
 ### Add Sponsor to Student
 A sponsor should be added to a student and linked to one and only one Degree Programme application number. A customized DP Application Number is required for each general material of group INVOICE and Type REC of a degree programme student. Up to 2 sponsors can be added (currently only one). The student seeded general material transaction (Material Group = 'INVOICE', Material Type = 'REC', to track the student sponsor) should maintain the "Comment" value = existing application number concatenated with the new application number; the seeded transaction must be updated similarly.
 
-## Payment Plan -OLDPeopleSoft sends only the instalments assigned to the Student or Sponsor Payment Plan to TransferMate. "Payment Plan": creation/update/inactivation of a payment plan — once used by a student, it cannot be deleted.
+## Payment Plan -OLD
+PeopleSoft sends only the instalments assigned to the Student or Sponsor Payment Plan to TransferMate. "Payment Plan": creation/update/inactivation of a payment plan — once used by a student, it cannot be deleted.
 
 ### Payment Plan Price
 The Payment Plan Price equals the total of active & inactive instalment amounts. Transfermate can display the inactive instalments.
